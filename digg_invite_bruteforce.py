@@ -294,11 +294,16 @@ def main():
     # Get number of windows from user
     while True:
         try:
-            num_windows = int(input("How many Chrome windows do you want to run? (1-8): "))
-            if 1 <= num_windows <= 8:
+            windows_input = input("How many Chrome windows do you want to run? [default: 4]: ").strip()
+            if windows_input == '':
+                num_windows = 4
                 break
             else:
-                print("Please enter a number between 1 and 8.")
+                num_windows = int(windows_input)
+                if num_windows > 0:
+                    break
+                else:
+                    print("Please enter a positive number.")
         except ValueError:
             print("Please enter a valid number.")
     
