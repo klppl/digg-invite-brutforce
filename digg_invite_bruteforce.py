@@ -20,6 +20,11 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 import os
 from datetime import datetime
+import sys
+import platform
+import subprocess
+from pathlib import Path
+import stat
 
 class DiggInviteBruteForcer:
     def __init__(self, num_windows=1, headless=True, pause_on_valid=False):
@@ -56,7 +61,8 @@ class DiggInviteBruteForcer:
         
         # Add headless mode if requested
         if self.headless:
-            chrome_options.add_argument("--headless")
+            # Use the newer headless mode which is more stable in recent Chrome versions
+            chrome_options.add_argument("--headless=new")
             # Don't disable JavaScript - we need it to load the error message!
         
         # Disable logging
@@ -64,25 +70,67 @@ class DiggInviteBruteForcer:
         chrome_options.add_experimental_option('useAutomationExtension', False)
         chrome_options.add_experimental_option("detach", True)
         
+        def _strip_quarantine(path: str) -> None:
+            if sys.platform == "darwin" and path and os.path.exists(path):
+                try:
+                    subprocess.run(["xattr", "-dr", "com.apple.quarantine", path], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                try:
+                    mode = os.stat(path).st_mode
+                    os.chmod(path, mode | stat.S_IXUSR)
+                except Exception:
+                    pass
+
+        def _find_chromedriver_binary(candidate_path: str) -> str:
+            """Return a likely executable chromedriver path for macOS/Linux."""
+            if not candidate_path:
+                return candidate_path
+            p = Path(candidate_path)
+            # If already a file and executable, use it
+            if p.is_file() and os.access(str(p), os.X_OK):
+                return str(p)
+            # If it's a directory or an unexpected file (e.g., THIRD_PARTY_NOTICES.chromedriver), search for 'chromedriver'
+            search_root = p if p.is_dir() else p.parent
+            try:
+                for sub in search_root.rglob("chromedriver"):
+                    if sub.is_file():
+                        return str(sub)
+            except Exception:
+                pass
+            return candidate_path
+
         try:
-            # Try to install ChromeDriver automatically
-            service = Service(ChromeDriverManager().install())
+            # Prefer Selenium Manager (built into Selenium 4.6+) – works well on macOS
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.set_page_load_timeout(10)
+            return driver
         except Exception as e:
-            print(f"⚠️  ChromeDriver auto-install failed: {e}")
-            print("Trying to use system ChromeDriver...")
-            # Fall back to system chromedriver
-            service = Service()
+            print(f"⚠️  Selenium Manager initialization failed: {e}")
+            print("Falling back to webdriver-manager…")
         
         try:
+            # Try to install ChromeDriver automatically via webdriver-manager
+            raw_path = ChromeDriverManager().install()
+            binary_path = _find_chromedriver_binary(raw_path)
+            _strip_quarantine(binary_path)
+            service = Service(binary_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.set_page_load_timeout(10)
             return driver
         except Exception as e:
             print(f"❌ Failed to start Chrome: {e}")
             print("\n🔧 Troubleshooting tips:")
-            print("1. Make sure Chrome is installed: sudo apt install google-chrome-stable")
-            print("2. Install ChromeDriver manually: sudo apt install chromium-chromedriver")
-            print("3. Try updating webdriver-manager: pip install --upgrade webdriver-manager")
+            if sys.platform == "darwin":
+                print("1. Ensure Chrome is installed: brew install --cask google-chrome")
+                print("2. Clear webdriver cache: rm -rf ~/.wdm/drivers/chromedriver")
+                print("3. Re-run the script to let Selenium download the correct driver")
+                print("4. If blocked by macOS, allow the driver in System Settings > Privacy & Security")
+                print("5. Or install chromedriver: brew install chromedriver (then run it once to approve)")
+            else:
+                print("1. Make sure Chrome is installed")
+                print("2. Try updating webdriver-manager: pip install --upgrade webdriver-manager")
+                print("3. Clear webdriver cache: rm -rf ~/.wdm/drivers/chromedriver")
             raise
         
     def generate_random_code(self, length=6):
